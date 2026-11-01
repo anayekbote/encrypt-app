@@ -1,390 +1,185 @@
-# Encrypt v1.0.0
+# Encrypt (v2.0.0)
 
-**Encrypt** is an offline, zero-network authenticated encryption tool built with Flutter for Android and Windows. It enables two parties to exchange confidential, tamper-evident messages over untrusted communication channels using a pre-shared passphrase.
+Encrypt is an offline, air-gapped public-key cryptographic tool for Android and Windows. Built on the **IETF RFC 9180 (Hybrid Public Key Encryption / HPKE)** specification, Encrypt eliminates shared passwords by providing asynchronous authenticated encryption using **Curve25519 (X25519)**, **HKDF-SHA256**, and **AES-256-GCM**.
 
-**Cryptographic algorithms:** AES-256-GCM and PBKDF2-HMAC-SHA256.
-
-> [!WARNING]
-> ENCv1 uses a static salt and only 10,000 PBKDF2 iterations. Weak passphrases may be vulnerable to offline dictionary attacks. Do not use this configuration to protect high-value secrets.
+Private keys are protected at rest using **Argon2id**-hardened vaults, and volatile heap memory is governed by a 15-minute auto-locking timer.
 
 ---
-
-## Table of Contents
-
-- [Features](#features)
-- [Downloads](#downloads)
-- [How It Works](#how-it-works)
-- [Cryptographic Specification](#cryptographic-specification)
-- [Message Format](#message-format)
-- [Encryption and Decryption](#encryption-and-decryption)
-- [Security Model](#security-model)
-- [Limitations](#limitations)
-- [Compatibility](#compatibility)
-- [License](#license)
-
----
-
-## Features
-
-- **Authenticated encryption:** AES-256-GCM provides confidentiality and integrity.
-- **Password-based key derivation:** PBKDF2-HMAC-SHA256 derives a 256-bit encryption key.
-- **Cross-platform support:** Available for Android and Windows.
-- **Offline operation:** Designed to process messages locally without a remote service.
-- **Portable messages:** Base64-encoded ciphertext can be shared through SMS, email, or messaging applications.
-- **Tamper detection:** Modified or corrupted messages fail authentication.
-- **Versioned format:** The `ENCv1:` prefix identifies the message format.
-- **No server dependency:** Encryption and decryption do not require a remote service.
 
 ## Downloads
 
-Download the standalone release binaries from the [GitHub Releases](../../releases) page.
+Download standalone binaries directly from the [Releases](../../releases) section:
 
-| Platform | Architecture | Release file |
-|---|---|---|
-| Android | ARM64 (`arm64-v8a`) | `app-arm64-v8a-release.apk` |
-| Android | ARM32 (`armeabi-v7a`) | `app-armeabi-v7a-release.apk` |
-| Windows | x64 (64-bit) | `Encrypt_Setup_v1.0.0.exe` |
-
-Windows builds target Windows 10 and Windows 11. ARM64 is recommended for most modern Android smartphones; the ARM32 build is for compatible 32-bit devices.
+| Platform | Target Architecture | File Name | Description |
+| :--- | :--- | :--- | :--- |
+| **Android** | ARM 64-bit (`arm64-v8a`) | `app-arm64-v8a-release.apk` | Recommended for all modern 64-bit Android smartphones |
+| **Android** | ARM 32-bit (`armeabi-v7a`) | `app-armeabi-v7a-release.apk` | For legacy or budget 32-bit Android devices |
+| **Windows** | x64 (64-bit Intel/AMD) | `Encrypt_Setup_v2.0.0.exe` | Standard Windows 10/11 desktop installer |
 
 ---
 
-## How It Works
+## Core Features
 
-Encrypt uses symmetric encryption. Both participants must know the same passphrase.
+- **Asynchronous Public-Key Encryption:** Encrypt messages using the recipient's public key alone. No pre-shared passwords or synchronous handshakes required.
+- **IETF RFC 9180 HPKE Architecture:** Implements the `DHKEM(X25519, HKDF-SHA256)` Key Encapsulation Mechanism combined with `AES-256-GCM` AEAD.
+- **Argon2id Vault Protection:** At-rest private keys are sealed with memory-hard Argon2id key derivation, resisting GPU, ASIC, and distributed dictionary attacks.
+- **Volatile Memory Auto-Lock:** Unlocked private keys reside in volatile heap memory and are wiped automatically after 15 minutes of inactivity.
+- **Air-Gapped Operation:** Operates with zero network permissions (`android.permission.INTERNET` is omitted), ensuring keys and plaintexts never touch a network socket.
+- **Local Contact Management:** Store, label, inspect, copy, and delete recipient public keys with 8-byte SHA-256 identity fingerprints.
+
+---
+
+## Cryptographic Architecture & Flow
 
 ```text
-SENDER
-  |
-  v
-Plaintext + Passphrase
-  |
-  v
-PBKDF2-HMAC-SHA256
-  |
-  v
-256-bit Encryption Key
-  |
-  v
-AES-256-GCM
-  |
-  v
-Nonce + Ciphertext + Authentication Tag
-  |
-  v
-Base64 Encoding
-  |
-  v
-ENCv1:<Base64Payload>
-  |
-  v
-Untrusted Communication Channel
-  |
-  v
-RECEIVER
-  |
-  v
-Decode + Derive Key + Verify Tag
-  |
-  +---- Valid ----> Return Plaintext
-  |
-  +---- Invalid --> Reject Message
+SENDER (Alice)                                              RECEIVER (Bob)
+[ Recipient PK (pkR) ]                                      [ Master Password ]
+         │                                                           │
+         ▼                                                           ▼
+Generate Ephemeral Keypair (ekS, epkS)                      [ Argon2id KDF ]
+         │                                                           │
+         ▼                                                           ▼
+ECDH: Shared Secret = X25519(ekS, pkR)                      Decrypt Vault -> Private Key (skR)
+         │                                                           │
+         ▼                                                           ▼
+HKDF-SHA256: Extract & Expand                               Paste "ENCv2:<Base64Payload>"
+         │                                                           │
+         ├──> Derived Symmetric Key (K)                              ▼
+         └──> Base Nonce (N)                                Extract epkS (Bytes 0..31)
+         │                                                           │
+         ▼                                                           ▼
+AES-256-GCM Seal(K, N, Plaintext)                           ECDH: Shared Secret = X25519(skR, epkS)
+         │                                                           │
+         ▼                                                           ▼
+Pack: epkS [32B] + Ciphertext [NB] + Tag [16B]              HKDF-SHA256: Derive identical (K, N)
+         │                                                           │
+         ▼                                                           ▼
+Serialize to Base64 -> Prefix "ENCv2:"                      AES-256-GCM Open & Verify Tag
+         │                                                           │
+         ▼                                                           ▼
+Send via SMS, WhatsApp, Email, or Web                       [ Verified Plaintext Output ]
 ```
 
-The receiver derives the same encryption key from the passphrase and verifies the authentication tag before accepting the plaintext.
+---
 
-**Important:** The passphrase is not included in the encrypted message. It must be shared separately through a trusted channel.
+## Mathematical Specification
+
+### 1. Key Encapsulation Mechanism: DHKEM(X25519, HKDF-SHA256)
+Diffie-Hellman operations are performed over Curve25519 in Montgomery form:
+
+$$E: y^2 = x^3 + 486662x^2 + x \pmod{2^{255} - 19}$$
+
+1. **Sender Ephemeral Generation:**
+   A secure 256-bit scalar $ek_S \in_R \mathbb{Z}_q$ is sampled using host CSPRNG. The sender calculates the ephemeral public point:
+   $$epk_S = ek_S \cdot G$$
+
+2. **Diffie-Hellman Shared Secret:**
+   Given the recipient's static public point $pk_R = sk_R \cdot G$:
+   $$\text{SharedSecret} = \text{X25519}(ek_S, pk_R) = ek_S \cdot (sk_R \cdot G) = sk_R \cdot (ek_S \cdot G) = \text{X25519}(sk_R, epk_S)$$
+
+### 2. Key Derivation: HKDF (RFC 5869)
+The shared secret is converted into a 256-bit symmetric key $K$ and 96-bit base nonce $N$ using HMAC-SHA256:
+
+1. **Extract Stage:**
+   $$\text{PRK} = \text{HMAC-SHA256}(\text{Salt} = \text{"HPKE-v1"}, \text{SharedSecret})$$
+
+2. **Expand Stage:**
+   Given the protocol context string $I = \text{"HPKE-AES256GCM"}$:
+   $$T(1) = \text{HMAC-SHA256}(\text{PRK}, I \parallel \text{0x01})$$
+   $$T(2) = \text{HMAC-SHA256}(\text{PRK}, T(1) \parallel I \parallel \text{0x02})$$
+   $$\text{OKM} = T(1) \parallel T(2)$$
+   $$K = \text{OKM}[0 \dots 31] \quad (256\text{-bit AEAD Key})$$
+   $$N = \text{OKM}[32 \dots 43] \quad (96\text{-bit Initialization Vector})$$
+
+### 3. Payload Encryption: AES-256-GCM (NIST SP 800-38D)
+Confidentiality is provided by AES in Counter (CTR) mode, and ciphertext authenticity is verified over Galois field $GF(2^{128})$:
+
+- **Ciphertext Generation:**
+  $$C_i = P_i \oplus \text{AES}_K(N \parallel \text{incr}_{32}(i))$$
+- **Authentication Tag ($T$):**
+  Evaluated over the field polynomial $f(x) = x^{128} + x^7 + x^2 + x + 1$ using GHASH:
+  $$T = \text{GHASH}_H(C) \oplus \text{AES}_K(N \parallel 0^{31}1)$$
+
+### 4. At-Rest Vault Key Protection: Argon2id
+To securely store private key $sk_R$ in device preferences:
+
+$$\text{VaultKey} = \text{Argon2id}(\text{Password}, \text{Salt}, t = 3, m = 65{,}536\text{ KiB}, p = 4, \text{keyLen} = 32)$$
+
+The raw 32-byte private key is then encrypted via AES-256-GCM using $\text{VaultKey}$ and written to persistent storage alongside its 128-bit authentication tag and salt.
 
 ---
 
-## Cryptographic Specification
+## Wire Format Specification
 
-### Encryption Algorithm
-
-| Parameter | ENCv1 value |
-|---|---|
-| Algorithm | AES-256-GCM |
-| Key length | 256 bits (32 bytes) |
-| Nonce length | 96 bits (12 bytes) |
-| Authentication tag | 128 bits (16 bytes) |
-| Padding | Not required |
-
-### Key Derivation
-
-| Parameter | ENCv1 value |
-|---|---|
-| Algorithm | PBKDF2-HMAC-SHA256 |
-| Passphrase | User-provided secret |
-| Salt | `CryptoApp_StaticSalt_v1` |
-| Salt encoding | UTF-8 |
-| Iteration count | 10,000 |
-| Derived-key length | 32 bytes |
-
-### Message Encoding
-
-| Parameter | ENCv1 value |
-|---|---|
-| Prefix | `ENCv1:` |
-| Binary layout | Nonce + Ciphertext + Authentication Tag |
-| Text encoding | Base64 |
-
-These parameters define the ENCv1 format and must remain consistent across compatible implementations.
-
-### 1. Key Derivation — PBKDF2-HMAC-SHA256
-
-PBKDF2 transforms a passphrase into a fixed-length cryptographic key.
-
-Let:
-
-- \(P\) = passphrase bytes.
-- \(S\) = UTF-8 bytes of `CryptoApp_StaticSalt_v1`.
-- \(c = 10{,}000\) = iteration count.
-- \(dkLen = 32\) bytes = derived-key length.
-- \(hLen = 32\) bytes = SHA-256 output length.
-
-The derived key is:
-
-\[
-DK = \operatorname{PBKDF2\text{-}HMAC\text{-}SHA256}(P,S,c,dkLen)
-\]
-
-Since \(dkLen = hLen\), only one output block is required:
-
-\[
-DK = T_1 = \bigoplus_{i=1}^{c} U_i
-\]
-
-where:
-
-\[
-U_1 = \operatorname{HMAC\text{-}SHA256}
-(P,S \parallel \operatorname{INT}_{32BE}(1))
-\]
-
-and:
-
-\[
-U_i = \operatorname{HMAC\text{-}SHA256}(P,U_{i-1})
-\]
-
-for \(2 \le i \le c\).
-
-The result is a 32-byte key suitable for AES-256.
-
-**Security consideration:** ENCv1 uses a static salt rather than a unique, randomly generated salt for each message. This permits attackers to reuse password-guessing work across messages. The low iteration count also makes weak passphrases easier to crack.
-
-### 2. Authenticated Encryption — AES-256-GCM
-
-AES-GCM combines counter-mode encryption with authentication using GHASH over the finite field \(GF(2^{128})\).
-
-For encryption key \(K\), nonce \(N\), and plaintext \(P\):
-
-\[
-(C,T) = \operatorname{AES\text{-}256\text{-}GCM}(K,N,P)
-\]
-
-where:
-
-- \(C\) = ciphertext.
-- \(T\) = 16-byte authentication tag.
-- \(N\) = 12-byte nonce.
-
-#### A. Confidentiality
-
-GCM uses AES counter mode to encrypt plaintext. The ciphertext length equals the plaintext length, so PKCS#7 padding is unnecessary.
-
-#### B. Integrity and Authentication
-
-GCM authenticates the encrypted data using GHASH and generates an authentication tag.
-
-During decryption, the tag must be verified before plaintext is released. If verification fails, the message must be rejected.
-
-The authentication tag demonstrates knowledge of the shared key, subject to the cryptographic assumptions. It does not independently establish the sender's identity. Anyone who knows the passphrase can generate valid messages.
-
-#### C. Nonce Requirements
-
-A nonce must be unique for every encryption under the same key.
-
-ENCv1 uses a randomly generated 96-bit nonce. Random generation makes collisions unlikely for small message volumes, but does not guarantee uniqueness.
-
-Applications encrypting large numbers of messages under a single key require a suitable nonce-management strategy.
-
----
-
-## Message Format
-
-Every encrypted message follows this format:
+ENCv2 serializes all cryptographic components into a single ASCII string:
 
 ```text
-ENCv1:<Base64Payload>
+ENCv2:<Base64( ) Auth Ciphertext Ephemeral Key Public Tag [16B] [32B] [NB] ||>
 ```
 
-The Base64 payload decodes into three consecutive fields:
+### Binary Frame Layout
 
 ```text
-+------------------+------------------+------------------+
-| Nonce            | Ciphertext       | Authentication   |
-| 12 bytes         | N bytes          | Tag: 16 bytes    |
-+------------------+------------------+------------------+
+ 0                            31 32                     N+31 N+32                 N+47
++-------------------------------+---------------------------+-------------------------+
+|  Ephemeral PubKey (32 Bytes)  |    Ciphertext (N Bytes)   |   Auth Tag (16 Bytes)   |
++-------------------------------+---------------------------+-------------------------+
+ \_____________________________/ \_________________________/ \_______________________/
+    Sender's Ephemeral X25519         AES-CTR Stream Output      128-bit GHASH Tag
+             Point
 ```
 
-### Binary Layout
-
-- **Bytes 0–11:** Nonce.
-- **Bytes 12 to 12 + N - 1:** Ciphertext.
-- **Final 16 bytes:** Authentication tag.
-
-The total decoded payload length is:
-
-\[
-L = 12 + N + 16 = 28 + N
-\]
-
-where \(N\) is the ciphertext length in bytes.
-
-### Payload Validation
-
-A conforming implementation should:
-
-1. Verify the `ENCv1:` prefix.
-2. Decode the Base64 payload.
-3. Reject malformed Base64 or payloads shorter than 28 bytes.
-4. Extract the nonce, ciphertext, and authentication tag.
-5. Derive the key using the ENCv1 parameters.
-6. Perform authenticated decryption.
-7. Return plaintext only after successful authentication.
-
-Empty plaintext is valid at the cryptographic level and produces a 28-byte binary payload.
-
-Implementations should enforce reasonable maximum message sizes to prevent excessive memory consumption.
+### Parsing & Verification Rules
+- The binary frame must be **at least 48 bytes** in length ($32\text{ bytes Ephemeral PK} + 0\text{ bytes Ciphertext} + 16\text{ bytes Tag}$).
+- Payloads missing the `ENCv2:` prefix or failing Base64 validation are rejected before invoking cryptographic primitives.
+- If tag verification fails, decryption halts immediately; **no plaintext fragments are emitted to application memory**.
 
 ---
 
-## Encryption and Decryption
+## Usage Guide
 
-### Encryption Process
+### 1. Set Up Your Identity
+1. Launch Encrypt and tap **Set Up Your Identity**.
+2. Enter a master password. The app executes Argon2id to derive a vault-encryption key and generates your persistent X25519 keypair.
+3. Your **Public Key** and 8-byte **Fingerprint** are displayed. Tap the copy icon to share your public key with anyone who wants to send you messages.
 
-1. Accept the plaintext and passphrase.
-2. Encode the passphrase according to the established ENCv1 encoding rules.
-3. Derive a 256-bit key using PBKDF2-HMAC-SHA256.
-4. Generate a cryptographically secure 12-byte nonce.
-5. Encrypt the plaintext using AES-256-GCM with a 128-bit authentication tag.
-6. Serialize the nonce, ciphertext, and authentication tag in the specified order.
-7. Encode the binary payload using Base64.
-8. Prefix the result with `ENCv1:`.
+### 2. Add Contacts
+1. In the **Send To (Contact)** section, tap the **Add Contact** icon (`+`).
+2. Enter a name/label and paste the recipient's Base64 public key.
+3. Tap **Add**. The app validates the 32-byte key length and stores the contact locally.
 
-### Decryption Process
+### 3. Encrypt a Message
+1. Select the intended recipient from the contact dropdown.
+2. Enter your plaintext in the input box.
+3. Tap **Encrypt**.
+4. Tap the copy icon in the **Result** card and share the generated `ENCv2:...` payload over any platform (SMS, chat app, email).
 
-1. Accept the encrypted message and passphrase.
-2. Validate the version prefix and Base64 encoding.
-3. Decode and validate the binary payload.
-4. Extract the nonce, ciphertext, and authentication tag.
-5. Derive the key using the same ENCv1 parameters.
-6. Decrypt and verify the authentication tag.
-7. Return plaintext only if authentication succeeds.
-
-Incorrect passphrases, corrupted messages, and invalid authentication tags should produce a decryption failure without exposing sensitive diagnostic information.
+### 4. Decrypt a Message
+1. Tap **Unlock** and enter your master password (unlocked keys remain valid for 15 minutes before automatically locking).
+2. Paste the `ENCv2:...` payload into the input box.
+3. Tap **Decrypt**. The verified plaintext will appear in the **Result** card.
 
 ---
 
-## Security Model
+## Security Model & Limitations
 
-Encrypt is designed to protect message contents when encrypted messages travel through untrusted communication channels.
+While ENCv2 provides IND-CCA2 security against active channel adversaries, deployments must consider these explicit boundaries:
 
-### Security Properties
+1. **Public-Key Authenticity (Trust-on-First-Use):**
+   - Encrypt is intentionally decentralized and does not use centralized Public Key Infrastructure (PKI) or certificate authorities.
+   - Users must verify contacts' 8-byte fingerprints out-of-band (e.g., in-person or over a voice call) to prevent adversary key-substitution (Man-in-the-Middle) attacks.
 
-| Property | ENCv1 behavior |
-|---|---|
-| Confidentiality | Provided by AES-256-GCM, subject to key security and correct implementation |
-| Ciphertext integrity | Provided by GCM authentication |
-| Key-possession verification | A valid tag demonstrates knowledge of the shared key, subject to cryptographic assumptions |
-| Sender identity | Not independently established |
-| Replay prevention | Not provided |
-| Forward secrecy | Not provided |
-| Metadata confidentiality | Not provided |
-| Compromised-device protection | Not provided |
+2. **Absence of Cryptographic Timestamps (Replay Attacks):**
+   - `ENCv2:` payloads do not embed monotonic counters or timestamps.
+   - An attacker can intercept a valid ciphertext and re-send it to the recipient at a later date. Applications requiring strict replay protection should include an application-level timestamp within the message text.
 
-### 1. Shared-Passphrase Model
+3. **Forward Secrecy vs. Recipient Compromise:**
+   - **Sender Forward Secrecy:** Guaranteed. A fresh ephemeral keypair ($ek_S, epk_S$) is generated per message and destroyed immediately after encryption.
+   - **Recipient Key Compromise:** If an attacker compromises the recipient's master password and local vault, all historical messages delivered to that recipient's static public key can be decrypted.
 
-Both participants must possess the same passphrase.
-
-If an attacker obtains the passphrase, they can decrypt captured messages and generate new authenticated messages.
-
-Use strong, unique passphrases and exchange them through a trusted channel. Sharing the passphrase alongside the ciphertext through the same compromised channel defeats the intended protection.
-
-### 2. Static Salt
-
-ENCv1 uses the application-wide static salt:
-
-```text
-CryptoApp_StaticSalt_v1
-```
-
-A static salt allows password-guessing work to be reused across messages encrypted using the same derivation parameters.
-
-A unique salt per message would prevent this reuse, although it would not eliminate offline password guessing.
-
-### 3. PBKDF2 Work Factor
-
-ENCv1 uses 10,000 PBKDF2-HMAC-SHA256 iterations.
-
-This iteration count provides limited resistance to offline dictionary attacks, particularly when passphrases are short, common, or predictable.
-
-AES-256 does not compensate for a weak passphrase. Overall security depends substantially on passphrase entropy and the cost of deriving each candidate key.
-
-### 4. Replay Attacks
-
-An attacker can retransmit an unchanged, valid encrypted message even if they cannot read or modify it.
-
-Applications that trigger actions based on received messages should implement authenticated sequence numbers, unique message identifiers, or another replay-prevention mechanism.
-
-### 5. Local Device Exposure
-
-Encrypt cannot guarantee confidentiality on a compromised device. Sensitive data may be exposed through:
-
-- Malware or keyloggers.
-- Clipboard history and synchronization.
-- Screenshots or screen recording.
-- Operating-system memory dumps.
-- Debug logs and crash reports.
-- Physical access to an unlocked device.
-
-Avoid logging or unnecessarily persisting passphrases, derived keys, and plaintext.
-
----
-
-## Limitations
-
-- Requires an independently shared passphrase.
-- Uses a static salt and a relatively low PBKDF2 iteration count.
-- Does not independently verify sender identity.
-- Does not provide replay protection or forward secrecy.
-- Depends on correct cryptographic implementation and secure random-number generation.
-- Cannot protect plaintext exposed on a compromised endpoint.
-- Does not hide message length, timing, or communication patterns.
-- Does not prevent an attacker with the passphrase from creating valid messages.
-
----
-
-## Compatibility
-
-ENCv1 defines a fixed cryptographic and serialization format.
-
-A future version should use a distinct prefix, such as `ENCv2:`, with an explicitly documented cryptographic specification.
-
-Potential improvements include:
-
-- A cryptographically random, per-message salt.
-- A stronger, benchmarked password-based key derivation configuration.
-- Explicit passphrase encoding and normalization rules.
-- Appropriate nonce-management safeguards.
-- Authenticated protocol metadata and replay protection where required.
-- Maximum payload sizes and uniform error handling.
-- Cross-platform test vectors for Android and Windows.
-
-Existing ENCv1 messages should remain decryptable for as long as backward compatibility is required.
-
-New cryptographic parameters must never be applied to old messages implicitly. Each version should use its own clearly defined parsing, key derivation, and encryption rules.
+4. **Operating System & Clipboard Exposure:**
+   - Decrypted plaintexts copied to the operating system clipboard can be read by other applications with clipboard access.
+   - Devices infected with screen recorders, keyloggers, or hardware root compromises are outside the protection perimeter.
 
 ---
 
